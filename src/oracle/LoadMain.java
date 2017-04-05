@@ -3,7 +3,11 @@
  * 
  * 1. csv파일의 경로를 얻어오기
  * 2. csv파일을 ','로 구분하여 insert문으로 쿼리 실행
- * 
+ * 3. excel파일 얻어오기
+ * 4. excel파일의 데이터를 불러와 insert문으로 쿼리 실행
+ * 5. JTable 구현
+ * 6. JTable 내 column 수정
+ * -> JTable 내 수정은 사용되고 있는 TableModel에 의해 제어됨(관련 메소드 override), TableModelListener 사용
  * 주의)
  * insert문을 while문으로 돌리면 while문 속도가 insert(DB oracle 원격) 속도보다 빠르기 때문에 부분 에러
  * -> Sub Thread를 이용하여 sleep을 걸어 싱크를 맞추자!
@@ -23,7 +27,11 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Vector;
 
 import javax.swing.JButton;
 import javax.swing.JFileChooser;
@@ -33,14 +41,17 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
+import javax.swing.event.TableModelEvent;
+import javax.swing.event.TableModelListener;
 
 import org.apache.poi.hssf.usermodel.HSSFCell;
+import org.apache.poi.hssf.usermodel.HSSFCellStyle;
 import org.apache.poi.hssf.usermodel.HSSFRow;
 import org.apache.poi.hssf.usermodel.HSSFSheet;
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
 import org.apache.poi.ss.usermodel.DataFormatter;
 
-public class LoadMain extends JFrame implements ActionListener{
+public class LoadMain extends JFrame implements ActionListener, TableModelListener{
 	JPanel p_north;
 	JTextField t_path;
 	JButton bt_open, bt_load, bt_excel, bt_del;
@@ -60,6 +71,9 @@ public class LoadMain extends JFrame implements ActionListener{
 	// DBManager 초기화
 	DBManager manager=DBManager.getInstance();
 	
+	Vector<Vector> list;
+	Vector columnName;
+	
 	public LoadMain() {
 		p_north=new JPanel();
 		t_path=new JTextField(25);
@@ -68,6 +82,8 @@ public class LoadMain extends JFrame implements ActionListener{
 		bt_excel=new JButton("엑셀 로드");
 		bt_del=new JButton("삭제 하기");
 		
+		// 아무 모델을 적용하지 않는 JTable은 편집 가능
+		// TableModel을 이용하면 JTable의 편집 여부도 TableModel이 관여
 		table=new JTable();
 		scroll=new JScrollPane(table);
 		
@@ -200,9 +216,22 @@ public class LoadMain extends JFrame implements ActionListener{
 				else{
 					System.out.println("첫번째 줄은 제외");
 				}
-					
 			}
 			JOptionPane.showMessageDialog(this, "Migration 완료!");
+			
+			// JTable 출력 -> Model 적용
+			getList();
+			
+			// JTable에 모델 적용
+			table.setModel(new MyModel(columnName, list));
+			
+			// 이때, JTable에 TableModel을 적용하고 적용한 TableModel에 Listener를 추가해야 시점이 맞음!
+			// TableModel과 Listener 연결
+			// JTable은 현재 자신이 사용하고 있는 모델을 반환해줌!(굳이 변수로 빼지 않아도 됨!)
+			table.getModel().addTableModelListener(this);
+			
+			table.updateUI();
+			
 		} catch (IOException e) {
 			e.printStackTrace();
 		} catch (SQLException e) {
@@ -236,6 +265,11 @@ public class LoadMain extends JFrame implements ActionListener{
 	 * Excel
 	*/
 	public void loadExcel(){
+		StringBuffer sb=new StringBuffer();
+		PreparedStatement pstmt=null;
+		
+		ArrayList<String> valueArr=new ArrayList<>();
+		
 		// HSSFWorkbook(java.io.InputStream s)
 		// 위의 load()는 BufferReader를 사용하기 때문에 맞지 않아 FileInputStream을 따로 사용
 		int result=chooser.showOpenDialog(this);
@@ -274,6 +308,9 @@ public class LoadMain extends JFrame implements ActionListener{
 					
 					int totCol=row.getLastCellNum(); 
 					
+					sb.append("insert into hospital(seq, name, addr, regdate, status, dimension, type)");
+					//sb.append(" values(");
+					
 					for(int j=0; j<totCol; j++){	// Column
 						HSSFCell cell=row.getCell(j);
 						/*
@@ -287,16 +324,40 @@ public class LoadMain extends JFrame implements ActionListener{
 						*/
 						// 자료형에 국한되지 않고 모두 String 처리 가능
 						String value=df.formatCellValue(cell);
-						System.out.print(value+" ");
+						// System.out.print(value+" ");
+						
+						// oracle에 저장
+						valueArr.add(value);
+						System.out.println(valueArr.get(j));
+						
 					}
-					System.out.println();
-				}
-				
+					sb.append(" values("+valueArr.get(0)+",'"+valueArr.get(1)+"','"+valueArr.get(2)+"','"+valueArr.get(3)+"','"+valueArr.get(4)+"',"+valueArr.get(5)+",'"+valueArr.get(6)+"')");
+					// 반복문으로 구현해보기
+					
+					pstmt=con.prepareStatement(sb.toString());
+					// insert문이므로 반환형X, ResultSet 사용X
+					pstmt.executeUpdate();
+					// System.out.println();
+					System.out.println(sb.toString());
+					sb.delete(0, sb.length());
+					valueArr.removeAll(valueArr);
+				}	
 				
 			} catch (FileNotFoundException e) {
 				e.printStackTrace();
 			} catch (IOException e) {
 				e.printStackTrace();
+			} catch (SQLException e) {
+				e.printStackTrace();
+			} finally{
+				// 모든 작업이 끝나면 닫기
+				if(pstmt!=null){
+					try {
+						pstmt.close();
+					} catch (SQLException e) {
+						e.printStackTrace();
+					}
+				}
 			}
 			
 		}
@@ -305,6 +366,64 @@ public class LoadMain extends JFrame implements ActionListener{
 	// 선택한 레코드 삭제
 	public void delete(){
 		
+	}
+	
+	// 모든 레코드 가져오기
+	public void getList(){
+		String sql="select * from hospital order by seq asc";
+		PreparedStatement pstmt=null;
+		ResultSet rs=null;
+		
+		try {
+			pstmt=con.prepareStatement(sql);
+			rs=pstmt.executeQuery();	// JTable에서 TableModel의 getValue는 2차원 Vector 지원
+			
+			// 컬럼명도 추출 -> JTable의 MyModel의 생성자 인수(Vector columnName, Vector list)에서 필요함!
+			ResultSetMetaData meta=rs.getMetaData();
+			int colCnt=meta.getColumnCount();
+			columnName=new Vector();
+			
+			for(int i=0; i<colCnt; i++){
+				// MetaData는 1번째부터 시작
+				columnName.add(meta.getColumnName(i+1));
+			}
+			
+			// ResultSet을 2차원 vector로 가공하기
+			list=new Vector<Vector>();		// 2차원 vector(멤버변수로 선언해서 필요할때마다 접근 가능하도록 구현)
+	
+			// 커서 한 칸 전진할때마다
+			while(rs.next()){
+				// 레코드 1건 정보를 담을 vector
+				Vector vec=new Vector();	// 1차원 vector
+				
+				vec.add(rs.getString("seq"));
+				vec.add(rs.getString("name"));			
+				vec.add(rs.getString("addr"));			
+				vec.add(rs.getString("regdate"));			
+				vec.add(rs.getString("status"));			
+				vec.add(rs.getString("dimension"));			
+				vec.add(rs.getString("type"));
+				
+				list.add(vec);					// 2차원 vector로 담기!
+			}
+		} catch (SQLException e) {
+			e.printStackTrace();
+		} finally{
+			if(rs!=null){
+				try {
+					rs.close();
+				} catch (SQLException e) {
+					e.printStackTrace();
+				}
+			}
+			if(pstmt!=null){
+				try {
+					pstmt.close();
+				} catch (SQLException e) {
+					e.printStackTrace();
+				}
+			}
+		}
 	}
 	
 	// 버튼 클릭 구현
@@ -325,8 +444,33 @@ public class LoadMain extends JFrame implements ActionListener{
 		}
 	}
 	
+	// TableModel의 데이터값이 변경되면, 그 찰나를 감지하는 리스너
+	public void tableChanged(TableModelEvent e) {
+		Object obj=e.getSource();
+		MyModel model=(MyModel)obj;
+		
+		//System.out.println(e.getColumn());
+		//System.out.println(table.getSelectedRow()+","+ e.getColumn());
+		
+		// System.out.println("바꿨댜");
+		
+		/*
+		 * cell을 편집하면 row, col
+			당신이 편집한 cell은 row, col번째 cell입니다.
+			+
+			sql문 출력만 해보기
+			update hospital set 컬럼명=값 where (seq을 이용해 구분)
+		 * */
+		System.out.println("지금 "+table.getSelectedRow()+","+e.getColumn()+" 번째 cell을 변경했습니다.");
+		
+		StringBuffer sb=null;
+		sb.append("update hospital set ");
+		sb.append(model.getValueAt(table.getSelectedRow(), e.getColumn())+" where seq="+table.getValueAt(table.getSelectedRow(), 0));
+		System.out.println(sb.toString());
+		
+	}
+	
 	public static void main(String[] args) {
 		new LoadMain();
 	}
-
 }
