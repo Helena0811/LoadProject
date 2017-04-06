@@ -31,7 +31,15 @@ public class MyModel extends AbstractTableModel{
 
 	// row, col에 위치한 cell을 편집 여부를 판단하는 메소드
 	public boolean isCellEditable(int row, int col) {
-		return true;
+		boolean flag=false;
+		// column이 0번째인 경우(seq) 편집 불가능
+		if(col==0){
+			flag=false;
+		}
+		else{
+			flag=true;
+		}
+		return flag;
 	}
 	
 	// 각 cell의 값을 수정가능하도록 - row와 col에 위치하는 value를 수정

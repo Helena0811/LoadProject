@@ -17,6 +17,9 @@ package oracle;
 import java.awt.BorderLayout;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.BufferedReader;
@@ -51,7 +54,9 @@ import org.apache.poi.hssf.usermodel.HSSFSheet;
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
 import org.apache.poi.ss.usermodel.DataFormatter;
 
-public class LoadMain extends JFrame implements ActionListener, TableModelListener{
+import util.file.FileUtil;
+
+public class LoadMain extends JFrame implements ActionListener, TableModelListener, Runnable{
 	JPanel p_north;
 	JTextField t_path;
 	JButton bt_open, bt_load, bt_excel, bt_del;
@@ -72,14 +77,26 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 	DBManager manager=DBManager.getInstance();
 	
 	Vector<Vector> list;
-	Vector columnName;
+	Vector<String> columnName;
+	
+	// Excel 등록 시 사용될 쓰레드
+	// 데이터량이 너무 많거나 네트워크 상태가 좋지 않은 경우, insert 쿼리 실행이 while문의 속도를 따라가지 못함
+	// 의도적으로 시간 지연을 일으켜 insert를 시도
+	Thread thread;
+	
+	// Excel 파일에 의해 생성된 쿼리문을 쓰레드가 사용할 수 있는 상태로 저장
+	// sql문을 저장할 StringBuffer
+	StringBuffer insertSql=new StringBuffer();
+	
+	// 삭제할 대상 레코드의 seq값
+	String delSeq;	
 	
 	public LoadMain() {
 		p_north=new JPanel();
 		t_path=new JTextField(25);
-		bt_open=new JButton("파일 열기");
+		bt_open=new JButton("CSV 열기");
 		bt_load=new JButton("로드 하기");
-		bt_excel=new JButton("엑셀 로드");
+		bt_excel=new JButton("Excel 열기");
 		bt_del=new JButton("삭제 하기");
 		
 		// 아무 모델을 적용하지 않는 JTable은 편집 가능
@@ -95,6 +112,19 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 		bt_load.addActionListener(this);
 		bt_excel.addActionListener(this);
 		bt_del.addActionListener(this);
+		
+		// 테이블과 MouseListener 연결
+		table.addMouseListener(new MouseAdapter() {
+			public void mouseClicked(MouseEvent e) {
+				JTable t=(JTable)e.getSource();
+				
+				// seq좌표, 값 구하기
+				int row=t.getSelectedRow();
+				int col=0;
+				delSeq=(String)t.getValueAt(row, col);
+				
+			}
+		});
 		
 		p_north.add(t_path);
 		p_north.add(bt_open);
@@ -130,6 +160,7 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 	}
 	
 	// 파일 탐색기 띄우기
+	// 유효성 체크 : CSV파일이 아닌 경우
 	public void open(){
 		int result=chooser.showOpenDialog(this);
 		
@@ -140,6 +171,18 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 			
 			// 경로 출력
 			t_path.setText(file.getAbsolutePath());
+			
+			// CSV 파일 선택 유무 체크
+			/*
+			 * 시작값	lastIndexOf('.')+1
+			 * 끝값	파일 이름 길이
+			 * */
+			String ext=FileUtil.getExt(file.getAbsolutePath());
+
+			if(!ext.equals("csv")){
+				JOptionPane.showMessageDialog(this,"csv가 아닌 파일을 선택하셨습니다.");
+				return;		// 더 이상 진행하지 않음
+			}
 			
 			try {
 				reader=new FileReader(file);
@@ -161,6 +204,7 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 					
 				}
 				*/
+				
 				
 			} catch (FileNotFoundException e) {
 				e.printStackTrace();
@@ -230,8 +274,6 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 			// JTable은 현재 자신이 사용하고 있는 모델을 반환해줌!(굳이 변수로 빼지 않아도 됨!)
 			table.getModel().addTableModelListener(this);
 			
-			table.updateUI();
-			
 		} catch (IOException e) {
 			e.printStackTrace();
 		} catch (SQLException e) {
@@ -265,10 +307,15 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 	 * Excel
 	*/
 	public void loadExcel(){
-		StringBuffer sb=new StringBuffer();
-		PreparedStatement pstmt=null;
+		// 컬럼명들을 저장할 StringBuffer
+		StringBuffer cols=new StringBuffer();
 		
-		ArrayList<String> valueArr=new ArrayList<>();
+		// 컬럼값을 저장할 StringBuffer
+		StringBuffer data=new StringBuffer();
+		
+		// 내가 한 방식
+		//PreparedStatement pstmt=null;
+		//ArrayList<String> valueArr=new ArrayList<>();
 		
 		// HSSFWorkbook(java.io.InputStream s)
 		// 위의 load()는 BufferReader를 사용하기 때문에 맞지 않아 FileInputStream을 따로 사용
@@ -303,16 +350,54 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 				// 형식을 변경할 수 있는 클래스(Cell의 데이터 형식이 numeric, String 섞여있음)
 				DataFormatter df=new DataFormatter();
 				
+				/*-----------------------------------------------------*/
+				/*
+				 * 강사님 방법
+				 * 첫번째 row는 데이터가 아닌 컬럼 정보이므로, 이 정보들을 추출하여 insert into table(값)
+				 * */
+				// 불러온 sheet의 첫번째 row의 번호
+				//System.out.println("이 파일의 첫번째 row 번호는 "+sheet.getFirstRowNum());
+				HSSFRow firstRow=sheet.getRow(sheet.getFirstRowNum());		// 불러온 sheet의 첫번째 row
+				
+				cols.delete(0,cols.length());
+				// Row를 알아냈으니 column 분석
+				for(int i=0; i<firstRow.getLastCellNum(); i++){
+					HSSFCell cell=firstRow.getCell(i);
+					//System.out.print(cell.getStringCellValue());
+					cols.append(cell.getStringCellValue());
+					
+					// 마지막에는 ','가 붙지 않도록
+					/*
+					 * if(i<firstRow.getLastCellNum()-1){
+					 * 	System.out.print(cell.getStringCellValue()+",");
+					 * }
+					 * else{
+					 * 	System.out.print(cell.getStringCellValue());
+					 * }
+					 * */
+					if(i!=firstRow.getLastCellNum()-1){
+						//System.out.print(",");
+						cols.append(",");
+					}
+				}
+				/*-----------------------------------------------------*/
+				
+				/*
+				 * sheet로부터 데이터를 불러와서 내용 읽어보기
+				 * */
+				
 				for(int i=1; i<=totRow; i++){		// Row
-					HSSFRow row=sheet.getRow(i);
+					HSSFRow row=sheet.getRow(i);	
 					
 					int totCol=row.getLastCellNum(); 
-					
-					sb.append("insert into hospital(seq, name, addr, regdate, status, dimension, type)");
+
+					//sb.append("insert into hospital(seq, name, addr, regdate, status, dimension, type)");
 					//sb.append(" values(");
+					data.delete(0, data.length());
 					
 					for(int j=0; j<totCol; j++){	// Column
-						HSSFCell cell=row.getCell(j);
+
+						HSSFCell cell=row.getCell(j);	
 						/*
 						// numeric과 String 구분하기
 						if(cell.getCellType()==HSSFCell.CELL_TYPE_NUMERIC){
@@ -326,31 +411,102 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 						String value=df.formatCellValue(cell);
 						// System.out.print(value+" ");
 						
-						// oracle에 저장
-						valueArr.add(value);
-						System.out.println(valueArr.get(j));
+						/*-----------------------------------------------------*/
+						// 강사님 방법
+						// String형일 경우 홑따옴표 필요
+						if(cell.getCellType()==HSSFCell.CELL_TYPE_STRING){
+							value="'"+value+"'";
+						}
 						
+						// column값들을 data에 저장
+						data.append(value);
+						if(j!=totCol-1){
+							data.append(",");
+						}
+						
+						/*-----------------------------------------------------*/
+						// 내 방법
+						// oracle에 저장
+						// valueArr.add(value);
+						// System.out.println(valueArr.get(j));
+
 					}
-					sb.append(" values("+valueArr.get(0)+",'"+valueArr.get(1)+"','"+valueArr.get(2)+"','"+valueArr.get(3)+"','"+valueArr.get(4)+"',"+valueArr.get(5)+",'"+valueArr.get(6)+"')");
-					// 반복문으로 구현해보기
+					// System.out.println("insert into hospital(컬럼) values(값)");
+					// 내가 구현한 방법(ArrayList에 value값을 담아놓음)
+					//sb.append(" values("+valueArr.get(0)+",'"+valueArr.get(1)+"','"+valueArr.get(2)+"','"+valueArr.get(3)+"','"+valueArr.get(4)+"',"+valueArr.get(5)+",'"+valueArr.get(6)+"')");
 					
-					pstmt=con.prepareStatement(sb.toString());
+					/*-----------------------------------------------------*/
+					// sql문 실행 -> 쓰레드 이용
+					// 강사님 방법
+					// 모든 insert문을 저장해놓으므로 이중포문에 의한 타이밍 문제는 해결할 수 있음
+					insertSql.append("insert into hospital("+cols.toString()+")");
+					insertSql.append(" values("+data.toString()+");");
+					// sql의 구분자를 ;로 두어 누적된 sql에서 각 insert문을 구분함
+					
+					/*
+					pstmt=con.prepareStatement(insertSql.toString());
 					// insert문이므로 반환형X, ResultSet 사용X
 					pstmt.executeUpdate();
 					// System.out.println();
-					System.out.println(sb.toString());
-					sb.delete(0, sb.length());
+					System.out.println(insertSql.toString());
+					insertSql.delete(0, insertSql.length());
 					valueArr.removeAll(valueArr);
-				}	
+					* 
+					*/
+				}
+				
+				// 쓰레드를 돌릴 준비가 완료되었으니 실행시키기
+				// Runnable 인터페이스를 인수로 넣으면 아래 Thread의 run()을 수행하는 것이 아니라, Runnable 인터페이스를 구현한 상대의 run() 수행
+				// -> 우리가 정의한 run()
+				thread=new Thread(this);
+				                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
+				
+				JOptionPane.showMessageDialog(this, "Migration완료");
+				
+				/*
+				// 쓰레드가 끝나면 jtable UI 갱신
+				// JTable 출력 -> Model 적용
+				getList();
+				
+				// JTable에 모델 적용
+				table.setModel(new MyModel(columnName, list));
+				*/
+
 				
 			} catch (FileNotFoundException e) {
 				e.printStackTrace();
 			} catch (IOException e) {
 				e.printStackTrace();
+			} 
+		}
+	}
+	
+	// 선택한 레코드 삭제
+	public void delete(){
+		int result=JOptionPane.showConfirmDialog(this, delSeq+" 레코드를 삭제하시겠습니까?");
+		
+		// OK를 누르면
+		if(result==JOptionPane.OK_OPTION){
+			String sql="delete from hospital where seq="+delSeq;
+			PreparedStatement pstmt=null;
+			try {
+				pstmt=con.prepareStatement(sql);
+				int answer=pstmt.executeUpdate();
+				
+				if(answer!=0){
+					JOptionPane.showConfirmDialog(this, delSeq+" 레코드 삭제 완료");
+					
+					// 삭제 후 테이블 갱신
+					getList();
+					
+					// JTable에 모델 적용
+					table.setModel(new MyModel(columnName, list));
+					
+					table.updateUI();	
+				}
 			} catch (SQLException e) {
 				e.printStackTrace();
 			} finally{
-				// 모든 작업이 끝나면 닫기
 				if(pstmt!=null){
 					try {
 						pstmt.close();
@@ -361,11 +517,6 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 			}
 			
 		}
-	}
-	
-	// 선택한 레코드 삭제
-	public void delete(){
-		
 	}
 	
 	// 모든 레코드 가져오기
@@ -445,29 +596,103 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 	}
 	
 	// TableModel의 데이터값이 변경되면, 그 찰나를 감지하는 리스너
+	/*
+	 * 데이터 값이 변경되면 변경된 값의 위치인 row, col 출력
+	 * */
 	public void tableChanged(TableModelEvent e) {
-		Object obj=e.getSource();
-		MyModel model=(MyModel)obj;
-		
-		//System.out.println(e.getColumn());
-		//System.out.println(table.getSelectedRow()+","+ e.getColumn());
-		
-		// System.out.println("바꿨댜");
-		
 		/*
 		 * cell을 편집하면 row, col
 			당신이 편집한 cell은 row, col번째 cell입니다.
 			+
 			sql문 출력만 해보기
 			update hospital set 컬럼명=값 where (seq을 이용해 구분)
+			+
+			seq 컬럼은 편집 불가능(seq는 primary key)
 		 * */
-		System.out.println("지금 "+table.getSelectedRow()+","+e.getColumn()+" 번째 cell을 변경했습니다.");
+		// System.out.println("바꿨댜");
 		
-		StringBuffer sb=null;
-		sb.append("update hospital set ");
-		sb.append(model.getValueAt(table.getSelectedRow(), e.getColumn())+" where seq="+table.getValueAt(table.getSelectedRow(), 0));
-		System.out.println(sb.toString());
+		Object obj=e.getSource();
 		
+		PreparedStatement pstmt=null;
+		
+		int row=table.getSelectedRow();
+		int col=table.getSelectedColumn();
+		
+		// 컬럼명 구하기
+		String column=columnName.elementAt(col);
+		
+		// 지정한 좌표의 값 반환
+		String value=(String)table.getValueAt(row, col);
+		
+		// 지정한 좌표의 seq 값 반환
+		String seq=(String) table.getValueAt(row,0);
+		
+		System.out.println("지금 "+row+","+col+" 번째 cell을 변경했습니다.");
+		
+		// update문
+		String sql="update hospital set "+column+"="+value+" where seq="+seq;
+		
+		System.out.println(sql);
+		try {
+			pstmt=con.prepareStatement(sql);
+			int result=pstmt.executeUpdate(sql);
+			
+			if(result==1){
+				JOptionPane.showMessageDialog(this, "수정 완료");
+			}
+			
+		} catch (SQLException e1) {
+			e1.printStackTrace();
+		}
+		
+	}
+	
+	// 쓰레드 구현(insert문 쿼리 수행)
+	public void run() {
+		// 버퍼에 담긴 문자열의 길이까지 수행됨
+		// insertSql에 insert문이 몇 개 존재하는가?
+		// sql의 구분자를 ;로 두어 누적된 StringBuffer에서 각 insert문을 구분함
+		String[] str=insertSql.toString().split(";");
+		PreparedStatement pstmt=null;
+		
+		// System.out.println("SQL insert문 수는 "+str.length);
+		
+		// insert문 수행(쓰레드)
+		for(int i=0; i<str.length; i++){
+			//System.out.println(str[i]);
+			try {
+				Thread.sleep(200);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+			try {
+				pstmt=con.prepareStatement(str[i]);
+				int result=pstmt.executeUpdate();
+				System.out.println(result);
+			} catch (SQLException e) {
+				e.printStackTrace();
+			}
+		}
+		
+		// 쓰레드 동작이 끝나면
+		// 기존에 사용했던 StringBuffer 비우기
+		insertSql.delete(0, insertSql.length());
+		
+		if(pstmt!=null){
+			try {
+				pstmt.close();
+			} catch (SQLException e) {
+				e.printStackTrace();
+			}
+		}
+		
+		// table update
+		getList();
+		
+		// JTable에 모델 적용
+		table.setModel(new MyModel(columnName, list));
+		
+		table.updateUI();
 	}
 	
 	public static void main(String[] args) {
