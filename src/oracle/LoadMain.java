@@ -91,6 +91,8 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 	// 삭제할 대상 레코드의 seq값
 	String delSeq;	
 	
+	MyModel myModel;
+	
 	public LoadMain() {
 		p_north=new JPanel();
 		t_path=new JTextField(25);
@@ -267,7 +269,7 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 			getList();
 			
 			// JTable에 모델 적용
-			table.setModel(new MyModel(columnName, list));
+			table.setModel(myModel=new MyModel(columnName, list));
 			
 			// 이때, JTable에 TableModel을 적용하고 적용한 TableModel에 Listener를 추가해야 시점이 맞음!
 			// TableModel과 Listener 연결
@@ -498,8 +500,8 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 					// 삭제 후 테이블 갱신
 					getList();
 					
-					// JTable에 모델 적용
-					table.setModel(new MyModel(columnName, list));
+					// 방금 완성된 list를 다시 MyModel에 대입
+					myModel.list=list;
 					
 					table.updateUI();	
 				}
@@ -555,6 +557,7 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 				vec.add(rs.getString("type"));
 				
 				list.add(vec);					// 2차원 vector로 담기!
+				
 			}
 		} catch (SQLException e) {
 			e.printStackTrace();
@@ -684,14 +687,8 @@ public class LoadMain extends JFrame implements ActionListener, TableModelListen
 				e.printStackTrace();
 			}
 		}
-		
-		// table update
 		getList();
-		
-		// JTable에 모델 적용
-		table.setModel(new MyModel(columnName, list));
-		
-		table.updateUI();
+		table.setModel(myModel=new MyModel(columnName, list));
 	}
 	
 	public static void main(String[] args) {
